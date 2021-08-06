@@ -1,0 +1,430 @@
+pipeline{
+    agent {label'203'}
+    stages{
+	    stage('clean') {
+			steps {
+				  sh '''
+				  pwd
+				  rm -rf ${WORKSPACE}/*
+				  '''
+			}
+    	}
+        stage('CheckOut_authority') {
+			steps {
+				checkout([$class: 'SubversionSCM', additionalCredentials: [], excludedCommitMessages: '', excludedRegions: '', excludedRevprop: '', excludedUsers: '', filterChangelog: false, ignoreDirPropChanges: false, includedRegions: '', locations: [[cancelProcessOnExternalsFail: true, credentialsId: 'DSJ-public', depthOption: 'infinity', ignoreExternalsOption: true, local: '.', remote: 'https://10.45.136.234/svn/BDC/OceanAuth/branch/V1.1/oceanmind-authority/nacos-config']], quietOperation: true, workspaceUpdater: [$class: 'UpdateUpdater']]) 
+				sh '''
+				mv oceanmind-authority.yaml  ../
+				'''
+			}
+    	}
+        stage('CheckOut') {
+			steps {
+				checkout([$class: 'SubversionSCM', additionalCredentials: [], excludedCommitMessages: '', excludedRegions: '', excludedRevprop: '', excludedUsers: '', filterChangelog: false, ignoreDirPropChanges: false, includedRegions: '', locations: [[cancelProcessOnExternalsFail: true, credentialsId: 'DSJ-public', depthOption: 'infinity', ignoreExternalsOption: true, local: '.', remote: '${SVN_URL}/OceanMind-Service']], quietOperation: true, workspaceUpdater: [$class: 'UpdateUpdater']]) 
+			}
+    	}
+		stage('package'){
+			steps {
+			     wrap([$class: 'BuildUser'])
+    	        {
+    	            script {
+                         if (env.BUILD_USER == null){
+                            currentBuild.description = "本次构建由 SYSTEM 触发"
+		                	}else{
+				             currentBuild.description = "本次构建由 ${BUILD_USER} 触发"
+				                }
+					            withCredentials([usernamePassword(credentialsId: 'DSJ-public', passwordVariable: 'svn_p', usernameVariable: 'svn_n')]) {
+								//withCredentials([usernamePassword(credentialsId: 'version-order-test', passwordVariable: 'svn_p', usernameVariable: 'svn_n')]) {
+								sh '''
+					            #version_order
+					            chmod 755 -R version_order/version_order.conf
+					            a="no"
+				                if [ ${version} != "" ];then
+					                while read line
+					                do
+					            	[[ $line == ${version} ]] && a="yes"
+					            	echo $a
+					            	done < ./version_order/version_order.conf
+				                fi
+					            echo $a
+				                if [ X$a == X"no" ] && [ ${version} != "" ];then
+					               echo -e "\n${version}"  >> version_order/version_order.conf
+					               #sleep 60
+								   grep -v "^\\s*$"  version_order/version_order.conf > version_order/version_order_bak.conf
+								   mv version_order/version_order_bak.conf  version_order/version_order.conf
+								   cat version_order/version_order.conf
+					               svn commit -m "update the version_order.conf"  version_order  --username $svn_n --password $svn_p
+					            fi
+					            #sleep 60
+					            #svn commit -m "update the version_order.conf"  version_order  --username $svn_n --password $svn_p
+					            cat version_order/version_order.conf
+								'''
+								}
+                             }
+    	            sh '''
+					mv ../oceanmind-authority.yaml  ./
+					#校验$version
+				    #if [[ ${BUILD_USER} != SYSTEM && $version == [V][0-9]\\.[0-9]\\.[0-9][0-9]\\.[TC][0-9]* ]] || [[ ${BUILD_USER} != SYSTEM && $version == [V][0-9]\\.[0-9]\\.[0-9][0-9_]*\\.[TC][0-9]* ]] || [[ ${BUILD_USER} != SYSTEM && $version == '' ]] || [ ${BUILD_USER} == SYSTEM ];					
+					#then
+					#	continue;
+					#else
+					#	echo "参数校验失败，请输入正确的版本信息！"
+					#	exit 1;
+                    #fi
+					#
+					#校验$version20210729
+				    regex="^[V][0-9]{1,2}[.][0-9]{1,2}[.][0-9]{1,2}(.|(_HS.)|(_ZXXY.))[CT][0-9]{1,2}$"
+			    	if [[ ${BUILD_USER} != SYSTEM && $version == '' ]] || [[ ${BUILD_USER} != SYSTEM && $version =~ $regex ]] || [ ${BUILD_USER} == SYSTEM ];
+			    	then
+			    		continue;
+			    	else
+			    		echo "参数校验失败，请输入正确的版本信息！"
+			    		exit 1;
+		    		fi
+    	            ls -l */incsql
+					echo version is ${version}
+				    echo build_timestamp is ${BUILD_TIMESTAMP}
+					buildtime=`echo ${BUILD_TIMESTAMP}|tr -d "a-zA-Z"|awk '$1=$1'`
+			    	echo buildtime is  ${buildtime}
+					USER_ID=$BUILD_USER_ID
+			    	BUILD_USER_ID=''
+				    echo BUILD_USER_ID is ${BUILD_USER_ID}
+					code_path="${SVN_URL}/OceanMind-Service"
+					svn_revision_total=`svn info|grep -w 'Last Changed Rev'|awk -F ':' '{print $2}'|awk '$1=$1'`
+					#add the baseline info
+					echo -e "svn_code_path:${code_path}\nsvn_revision:${svn_revision_total}" > baseline_info.txt
+					#
+					cd shark-project
+					ls
+					#get the svn_revision for shark
+					svn_revision_shark=`svn info|grep -w 'Last Changed Rev'|awk -F ':' '{print $2}'|awk '$1=$1'`
+				    echo svn_revision_shark is ${svn_revision_shark}
+				    echo "INSERT INTO "shark"."version_info" VALUES ('shark', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_shark}', null, null, null, null, null, null);" >> incsql/version_info.sql
+					del="delete from shark.version_info where version_num in (select pversion_num from (select version_num as pversion_num from shark.version_info group by version_num having count(version_num) > 1) a) and update_time not in (select pupdate_time from (select max(update_time) as pupdate_time from shark.version_info group by version_num having count(version_num)  > 1 ) b)"
+				    echo "$del" >>  incsql/version_info.sql
+				    echo "INSERT INTO "shark"."version_info" VALUES ('shark', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_shark}', null, null, null, null, null, null)" >> sql/version_info.sql
+					mvn clean scala:compile compile package -Dmaven.test.skip=true
+					cd shark-spark-dist/target
+					tar zxvf shark-spark-runner-1.0-dist.tar.gz
+					pwd
+					ls
+					cd shark-spark-runner/
+					echo -e "service_name:shark-spark-runner\nversion_num:${version}\nbuild_time:${buildtime}\nbuild_user:${BUILD_USER_ID}\nbuild_revision:${svn_revision_shark}" > version_info.txt
+					cd ..
+					tar zcvf shark-spark-runner-1.0-dist.tar.gz shark-spark-runner/*
+					cd $WORKSPACE
+					cd shark-project/shark-flink-dist/target/
+					tar zxvf shark-flink-runner-1.0-dist.tar.gz
+					cd shark-flink-runner/
+					echo -e "service_name:shark-flink-runner\nversion_num:${version}\nbuild_time:${buildtime}\nbuild_user:${BUILD_USER_ID}\nbuild_revision:${svn_revision_shark}" > version_info.txt
+					cd ..
+					sh shark-flink-runner/init.sh
+					tar zcvf shark-flink-runner-1.0-dist.tar.gz shark-flink-runner/*
+					cd $WORKSPACE
+				cd oceanmind-datafactory/oceanmind-datashow/oceanmind-datashow-client
+				mvn clean compile install -Dmaven.test.skip=true
+				cd -
+				cd oceanmind-datafactory/oceanmind-datafactory-flow/oceanmind-datafactory-flow-client-feign
+				mvn clean compile install -Dmaven.test.skip=true
+				cd -
+				cd oceanmind-devops/oceanmind-devops-taskcenter-client-feign
+				mvn clean compile install -Dmaven.test.skip=true
+				#新加
+				cd -
+				cd oceanmind-datamanagement/oceanmind-datamanagement-dispatcher-client-feign
+				mvn clean compile install -Dmaven.test.skip=true
+				cd -
+				cd oceanmind-devops/oceanmind-operations/oceanmind-operations-client
+				mvn clean compile install -Dmaven.test.skip=true
+				cd -
+				#
+				cd oceanmind-datafactory
+				ls
+				#get the svn_revision for datafactory
+				svn_revision_datafactory=`svn info|grep -w 'Last Changed Rev'|awk -F ':' '{print $2}'|awk '$1=$1'`
+				echo svn_revision_datafactory is ${svn_revision_datafactory}
+				mvn clean compile install -Dmaven.test.skip=true
+				mkdir datafactory
+				cp oceanmind-datafactory/target/oceanmind-datafactory.jar datafactory
+				cp -r oceanmind-datafactory/src/main/resources/* datafactory
+				cp -r file datafactory
+				rm -rf datafactory/file/.svn
+				rm -rf datafactory/config/.svn
+				rm -rf datafactory/config/hdfs/.svn
+				echo -e "service_name:datafactory\nversion_num:${version}\nbuild_time:${buildtime}\nbuild_user:${BUILD_USER_ID}\nbuild_revision:${svn_revision_datafactory}" > datafactory/version_info.txt
+				echo "INSERT INTO "datafactory"."version_info" VALUES ('datafactory', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_datafactory}', null, null, null, null, null, null);" >> incsql/version_info.sql
+				del="delete from datafactory.version_info where version_num in (select pversion_num from (select version_num as pversion_num from datafactory.version_info group by version_num having count(version_num) > 1) a) and update_time not in (select pupdate_time from (select max(update_time) as pupdate_time from datafactory.version_info group by version_num having count(version_num)  > 1 ) b)"
+				echo "$del" >>  incsql/version_info.sql
+				echo "INSERT INTO "datafactory"."version_info" VALUES ('datafactory', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_datafactory}', null, null, null, null, null, null)" >> sql/version_info.sql
+				tar -zcvf datafactory.tar.gz datafactory
+				cd ..
+				cd oceanmind-devops
+				ls
+				#get the svn_revision for devops
+				svn_revision_devops=`svn info|grep -w 'Last Changed Rev'|awk -F ':' '{print $2}'|awk '$1=$1'`
+				echo svn_revision_devops is ${svn_revision_devops}
+				mvn clean compile install  -Dmaven.test.skip=true
+				mkdir devops
+				cp oceanmind-devops-server/target/oceanmind-devops-server-1.0.0.1.lite.jar devops
+				mkdir devops/config
+				cp -r oceanmind-devops-server/src/main/resources/* devops/config/
+				cp bin/* devops
+				echo -e "service_name:devops\nversion_num:${version}\nbuild_time:${buildtime}\nbuild_user:${BUILD_USER_ID}\nbuild_revision:${svn_revision_devops}" > devops/version_info.txt
+				echo "INSERT INTO "devops"."version_info" VALUES ('devops', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_devops}', null, null, null, null, null, null);" >> incsql/version_info.sql
+				del="delete from devops.version_info where version_num in (select pversion_num from (select version_num as pversion_num from devops.version_info group by version_num having count(version_num) > 1) a) and update_time not in (select pupdate_time from (select max(update_time) as pupdate_time from devops.version_info group by version_num having count(version_num)  > 1 ) b)"
+				echo "$del" >>  incsql/version_info.sql
+				echo "INSERT INTO "devops"."version_info" VALUES ('devops', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_devops}', null, null, null, null, null, null)" >> sql/version_info.sql
+				tar -zcvf devops.tar.gz devops
+				cd ..
+				#主数据只在主分支下执行20210729
+				if [[ ${SVN_URL} = "https://10.45.136.234/svn/BDC/OceanMind/branch/OceanMindLite/code/" ]] || [[ ${SVN_URL} = "https://10.45.136.234/svn/BDC/OceanMind/branch/V5.0.02_C10_HS/" ]];then
+				cd oceanmind-datamanagement
+				ls
+				svn_revision_datamanagement=`svn info|grep -w 'Last Changed Rev'|awk -F ':' '{print $2}'|awk '$1=$1'`
+				echo svn_revision_datamanagement is ${svn_revision_datamanagement}
+				mvn clean compile -DskipTests=true install -U
+				mkdir datamanagement
+				echo -e "service_name:datamanagement\nversion_num:${version}\nbuild_time:${buildtime}\nbuild_user:${BUILD_USER_ID}\nbuild_revision:${svn_revision_datamanagement}" > datamanagement/version_info.txt
+				cp oceanmind-datamanagement-server/target/oceanmind-datamanagement-server-1.0-SNAPSHOT.jar datamanagement
+				mkdir datamanagement/config
+				cp -r oceanmind-datamanagement-server/src/main/resources/* datamanagement/config/
+				cp bin/* datamanagement
+				tar -zcvf datamanagement.tar.gz datamanagement
+
+				cd ..
+				cd datasync
+				ls
+				svn_revision_masterDataSync=`svn info|grep -w 'Last Changed Rev'|awk -F ':' '{print $2}'|awk '$1=$1'`
+				echo svn_revision_masterDataSync is ${svn_revision_masterDataSync}
+				mvn clean compile  -DskipTests=true install -U
+				mkdir masterDataSync
+				echo -e "service_name:masterDataSync\nversion_num:${version}\nbuild_time:${buildtime}\nbuild_user:${BUILD_USER_ID}\nbuild_revision:${svn_revision_masterDataSync}" > masterDataSync/version_info.txt
+				cp -R target/bin/* target/conf target/lib target/data-sync-1.0.jar masterDataSync
+				tar -zcvf masterDataSync.tar.gz masterDataSync
+				echo "INSERT INTO "oceanmind_masterdata_inner"."version_info" VALUES ('datasync', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_masterDataSync}', null, null, null, null, null, null)" >> sql/version_info.sql
+				echo "INSERT INTO "oceanmind_masterdata_inner"."version_info" VALUES ('datasync', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_masterDataSync}', null, null, null, null, null, null);" >> incsql/version_info.sql
+				del="delete from oceanmind_masterdata_inner.version_info where version_num in (select pversion_num from (select version_num as pversion_num from oceanmind_masterdata_inner.version_info group by version_num having count(version_num) > 1) a) and update_time not in (select pupdate_time from (select max(update_time) as pupdate_time from oceanmind_masterdata_inner.version_info group by version_num having count(version_num)  > 1 ) b)"
+				echo "$del" >>  incsql/version_info.sql
+				cd ..
+
+				#
+                cd oceanmind-organization
+                ls
+                mvn clean compile -DskipTests=true install -U
+                mkdir organization
+                cp oceanmind-organization-server/target/oceanmind-organization-server-1.0-SNAPSHOT.jar organization
+                mkdir organization/config
+                cp oceanmind-organization-server/src/main/resources/relation.xml organization/config/
+                cp oceanmind-organization-server/src/main/resources/bootstrap.yml organization/config/
+                cp oceanmind-organization-server/src/main/resources/log4j2.xml organization/config/
+                cp bin/* organization
+				svn_revision_organization=`svn info|grep -w 'Last Changed Rev'|awk -F ':' '{print $2}'|awk '$1=$1'`
+				echo svn_revision_organization is ${svn_revision_organization}
+                echo -e "service_name:organization\nversion_num:${version}\nbuild_time:${buildtime}\nbuild_user:${BUILD_USER_ID}\nbuild_revision:${svn_revision_organization}" > organization/version_info.txt
+				echo "INSERT INTO "organization"."version_info" VALUES ('organization', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_organization}', null, null, null, null, null, null)" >> sql/version_info.sql
+				echo "INSERT INTO "organization"."version_info" VALUES ('organization', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_organization}', null, null, null, null, null, null);" >> incsql/version_info.sql
+				del="delete from organization.version_info where version_num in (select pversion_num from (select version_num as pversion_num from organization.version_info group by version_num having count(version_num) > 1) a) and update_time not in (select pupdate_time from (select max(update_time) as pupdate_time from organization.version_info group by version_num having count(version_num)  > 1 ) b)"
+				echo "$del" >>  incsql/version_info.sql
+                tar -zcvf organization.tar.gz organization
+                cd ..
+
+				#
+				cd collectTools_lz
+				svn_revision_collectTools_lz=`svn info|grep -w 'Last Changed Rev'|awk -F ':' '{print $2}'|awk '$1=$1'`
+				mvn clean compile -DskipTests=true install -U
+				echo "INSERT INTO "oceaneducation"."version_info" VALUES ('collectTools_lz', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_collectTools_lz}', null, null, null, null, null, null)" >> sql/version_info.sql
+				echo "INSERT INTO "oceaneducation"."version_info" VALUES ('collectTools_lz', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_collectTools_lz}', null, null, null, null, null, null);" >> incsql/version_info.sql
+				del="delete from oceaneducation.version_info where version_num in (select pversion_num from (select version_num as pversion_num from oceaneducation.version_info group by version_num having count(version_num) > 1) a) and update_time not in (select pupdate_time from (select max(update_time) as pupdate_time from oceaneducation.version_info group by version_num having count(version_num)  > 1 ) b)"
+				echo "$del" >>  incsql/version_info.sql
+				ls target
+				cd -
+				fi
+				
+				cd oceanmind-datamanager
+				ls
+				#get the svn_revision for datamanager
+				svn_revision_datamanager=`svn info|grep -w 'Last Changed Rev'|awk -F ':' '{print $2}'|awk '$1=$1'`
+				echo svn_revision_datamanager is ${svn_revision_datamanager}
+				mvn clean compile install -Dmaven.test.skip=true
+				mkdir datamanager
+				cp oceanmind-datamanager-server/target/oceanmind-datamanager-server.jar datamanager
+				mkdir datamanager/config
+				cp -r oceanmind-datamanager-server/src/main/resources/* datamanager/config/
+				echo -e "service_name:datamanager\nversion_num:${version}\nbuild_time:${buildtime}\nbuild_user:${BUILD_USER_ID}\nbuild_revision:${svn_revision_datamanager}" > datamanager/version_info.txt
+				echo "INSERT INTO "datamanager"."version_info" VALUES ('datamanager', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_datamanager}', null, null, null, null, null, null);" >> incsql/version_info.sql
+				del="delete from datamanager.version_info where version_num in (select pversion_num from (select version_num as pversion_num from datamanager.version_info group by version_num having count(version_num) > 1) a) and update_time not in (select pupdate_time from (select max(update_time) as pupdate_time from datamanager.version_info group by version_num having count(version_num)  > 1 ) b)"
+				echo "$del" >>  incsql/version_info.sql
+				echo "INSERT INTO "datamanager"."version_info" VALUES ('datamanager', '${version}', '${buildtime}', now(), '${BUILD_USER_ID}', '${svn_revision_datamanager}', null, null, null, null, null, null)" >> sql/version_info.sql
+				tar -zcvf datamanager.tar.gz datamanager
+				cd ..
+				cd oceanmind-security
+				ls
+				#get the svn_revision for security
+				svn_revision_security=`svn info|grep -w 'Last Changed Rev'|awk -F ':' '{print $2}'|awk '$1=$1'`
+				echo svn_revision_security is ${svn_revision_security}
+				mvn clean compile install -Dmaven.test.skip=true
+				mkdir security
+				cp oceanmind-security/target/oceanmind-security-1.0.0.1.lite.jar security
+				cp -r oceanmind-security/src/main/resources/* security
+				echo -e "service_name:security\nversion_num:${version}\nbuild_time:${buildtime}\nbuild_user:${BUILD_USER_ID}\nbuild_revision:${svn_revision_security}" > security/version_info.txt
+				tar -zcvf security.tar.gz security
+				cd ..
+				mkdir sql
+				mkdir sql/shark
+				mkdir sql/devops
+				mkdir sql/datafactory
+				mkdir sql/datamanager
+				mkdir sql/security
+				rm -rf shark-project/sql/.svn
+				cp -r shark-project/sql/* sql/shark/
+				rm -rf oceanmind-datafactory/sql/.svn
+				cp -r oceanmind-datafactory/sql/* sql/datafactory/
+				rm -rf oceanmind-devops/sql/.svn
+				cp -r oceanmind-devops/sql/* sql/devops/
+				rm -rf oceanmind-datamanager/sql/.svn
+				cp -r oceanmind-datamanager/sql/* sql/datamanager/
+				rm -rf oceanmind-security/sql/.svn
+				cp -r oceanmind-security/sql/* sql/security/
+				if [[ ${SVN_URL} = "https://10.45.136.234/svn/BDC/OceanMind/branch/OceanMindLite/code/" ]] || [[ ${SVN_URL} = "https://10.45.136.234/svn/BDC/OceanMind/branch/V5.0.02_C10_HS/" ]];then
+				mkdir sql/organization
+				rm -rf oceanmind-organization/sql/.svn
+				cp -r oceanmind-organization/sql/* sql/organization/
+				mkdir sql/collectTools_lz
+				rm -rf collectTools_lz/sql/.svn
+				cp -r collectTools_lz/sql/* sql/collectTools_lz/
+				mkdir sql/datasync
+				rm -rf datasync/sql/.svn
+				cp -r datasync/sql/* sql/datasync/
+				fi
+				tar -zcvf sql.tar.gz sql
+				cd nacos
+				mv ../oceanmind-authority.yaml  ./
+				#get the svn_revision for nacos
+				svn_revision_nacos=`svn info|grep -w 'Last Changed Rev'|awk -F ':' '{print $2}'|awk '$1=$1'`
+				echo svn_revision_nacos is ${svn_revision_nacos}
+				cd ..
+				rm -rf nacos/.svn
+				tar -zcvf nacos.tar.gz nacos
+				#incsql
+exe=\'\'\'
+#!/bin/sh
+#端口号
+PG_PORT=5432
+#数据库ip
+PG_IP=10.45.150.60
+#数据库用户名
+USERNAME=rhino
+#数据库密码
+PASSWORD=rhino
+#业务库库名
+DBNAME=oceanmind_lite
+export PGPASSWORD=${PASSWORD}
+SQLDIRPATH=`pwd`
+PGSQL_COMMAND="psql -U ${USERNAME} -h ${PG_IP} -d ${DBNAME} -p ${PG_PORT}"
+${PGSQL_COMMAND} -f "${SQLDIRPATH}/../version_info.sql"
+\'\'\'                
+				mkdir -p  incsql/oceanmind-datafactory
+				mkdir -p  incsql/oceanmind-datamanager
+				mkdir -p  incsql/oceanmind-devops
+				mkdir -p  incsql/shark-project
+				mv oceanmind-datafactory/incsql/*  incsql/oceanmind-datafactory
+				mv oceanmind-datamanager/incsql/*  incsql/oceanmind-datamanager
+				mv oceanmind-devops/incsql/*  incsql/oceanmind-devops
+				mv shark-project/incsql/*  incsql/shark-project
+				if [[ ${SVN_URL} = "https://10.45.136.234/svn/BDC/OceanMind/branch/OceanMindLite/code/" ]] || [[ ${SVN_URL} = "https://10.45.136.234/svn/BDC/OceanMind/branch/V5.0.02_C10_HS/" ]];then
+				    mkdir -p  incsql/collectTools_lz
+				    mkdir -p  incsql/oceanmind-organization
+				    mkdir -p  incsql/datasync
+				    mv collectTools_lz/incsql/*  incsql/collectTools_lz
+				    mv oceanmind-organization/incsql/*  incsql/oceanmind-organization
+				    mv datasync/incsql/*  incsql/datasync
+					if [ ${version} != '' ] ;then
+				        [[ ! -d "incsql/collectTools_lz/${version}" ]] && mkdir -p incsql/collectTools_lz/${version} && echo "$exe" > incsql/collectTools_lz/${version}/execute_sql.conf
+				        [[ ! -d "incsql/oceanmind-organization/${version}" ]] && mkdir -p incsql/oceanmind-organization/${version} && echo "$exe" > incsql/oceanmind-organization/${version}/execute_sql.conf
+		     	      # [[ ! -d "incsql/datasync/${version}" ]] && mkdir -p incsql/datasync/${version} && echo "$exe" > incsql/datasync/${version}/execute_sql.conf
+				        [[ ! -d "incsql/shark-project/${version}" ]] && mkdir -p incsql/shark-project/${version} && echo "$exe" > incsql/shark-project/${version}/execute_sql.conf
+					    [[ ! -d "incsql/oceanmind-devops/${version}" ]] && mkdir -p incsql/oceanmind-devops/${version} && echo "$exe" > incsql/oceanmind-devops/${version}/execute_sql.conf
+					    [[ ! -d "incsql/oceanmind-datamanager/${version}" ]] && mkdir -p incsql/oceanmind-datamanager/${version} && echo "$exe" > incsql/oceanmind-datamanager/${version}/execute_sql.conf
+					    [[ ! -d "incsql/oceanmind-datafactory/${version}" ]] && mkdir -p incsql/oceanmind-datafactory/${version} && echo "$exe" > incsql/oceanmind-datafactory/${version}/execute_sql.conf
+					else
+				        echo "主线版本为空"
+					fi
+				else
+				    if [ ${version} != '' ] ;then
+				        [[ ! -d "incsql/shark-project/${version}" ]] && mkdir -p incsql/shark-project/${version} && echo "$exe" > incsql/shark-project/${version}/execute_sql.conf
+					    [[ ! -d "incsql/oceanmind-devops/${version}" ]] && mkdir -p incsql/oceanmind-devops/${version} && echo "$exe" > incsql/oceanmind-devops/${version}/execute_sql.conf
+					    [[ ! -d "incsql/oceanmind-datamanager/${version}" ]] && mkdir -p incsql/oceanmind-datamanager/${version} && echo "$exe" > incsql/oceanmind-datamanager/${version}/execute_sql.conf
+					    [[ ! -d "incsql/oceanmind-datafactory/${version}" ]] && mkdir -p incsql/oceanmind-datafactory/${version} && echo "$exe" > incsql/oceanmind-datafactory/${version}/execute_sql.conf
+					else
+				        echo "非主线版本为空"
+				    fi 
+				fi
+				tar -zcvf  incsql.tar.gz  incsql
+				#tar the whole package
+				cd $WORKSPACE
+				#mkdir oceanmind_daas${version}
+				#cp $WORKSPACE/shark-project/shark-spark-dist/target/shark-spark-runner-1.0-dist.tar.gz $WORKSPACE/shark-project/shark-flink-dist/target/shark-flink-runner-1.0-dist.tar.gz $WORKSPACE/oceanmind-datafactory/datafactory.tar.gz $WORKSPACE/oceanmind-devops/devops.tar.gz $WORKSPACE/oceanmind-datamanager/datamanager.tar.gz $WORKSPACE/oceanmind-security/security.tar.gz $WORKSPACE/sql.tar.gz $WORKSPACE/nacos.tar.gz $WORKSPACE/incsql.tar.gz oceanmind_daas${version}
+				#tar zcvf oceanmind_daas${version}.tar.gz oceanmind_daas${version}/
+				#tar zcvf oceanmind_daas${version}.tar.gz -C$WORKSPACE/shark-project/shark-spark-dist/target/ shark-spark-runner-1.0-dist.tar.gz -C$WORKSPACE/shark-project/shark-flink-dist/target/ shark-flink-runner-1.0-dist.tar.gz -C$WORKSPACE/oceanmind-datafactory/ datafactory.tar.gz -C$WORKSPACE/oceanmind-devops/ devops.tar.gz -C$WORKSPACE/oceanmind-datamanager/ datamanager.tar.gz -C$WORKSPACE/oceanmind-security/ security.tar.gz -C$WORKSPACE/ sql.tar.gz -C$WORKSPACE/ nacos.tar.gz -C$WORKSPACE/ incsql.tar.gz
+				#
+				time_id="$buildtime #$BUILD_ID $USER_ID $version"
+				dir=`echo $time_id|sed 's/ /_/g'`
+				echo $dir
+				ansible 10.45.150.87 -s -U rhino -m shell -a "cd /home/rhino/oceanmind5_packages/OceanMind-Service_bak/;mkdir $dir"
+    	            '''
+					
+    	        }
+				
+			}
+		}
+		stage('publish'){
+			steps {
+			sh '''
+			#ansible 10.45.150.105 -s -U root -m shell -a "find /home/rhino/oceanmind5_packages/OceanMind-Service/ -maxdepth 1  -type f |xargs -I '{}' mv {} /home/rhino/oceanmind5_packages/OceanMind-Service/bak/"
+			#ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/oceanmind_daas${version}.tar.gz dest=/home/rhino/oceanmind_bak/oceanmind_back owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m shell -a "rm -rf /home/rhino/oceanmind5_packages/OceanMind-Service/*"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/shark-project/shark-spark-dist/target/shark-spark-runner-1.0-dist.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/shark-project/shark-flink-dist/target/shark-flink-runner-1.0-dist.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/oceanmind-datafactory/datafactory.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/oceanmind-devops/devops.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/oceanmind-datamanager/datamanager.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/oceanmind-security/security.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/sql.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/nacos.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/incsql.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/baseline_info.txt dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/version_order/version_order.conf dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			#在主分支条件下拷贝主数据
+			if [[ ${SVN_URL} = "https://10.45.136.234/svn/BDC/OceanMind/branch/OceanMindLite/code/" ]];then
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/oceanmind-datamanagement/datamanagement.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/datasync/masterDataSync.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/collectTools_lz/target/collecttool-1.0-SNAPSHOT.tar.gz  dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/oceanmind-organization/organization.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			fi
+			#在主分支条件下拷贝主数据，适配HS
+			if [[ ${SVN_URL} = "https://10.45.136.234/svn/BDC/OceanMind/branch/V5.0.02_C10_HS/" ]];then
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/oceanmind-datamanagement/datamanagement.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/datasync/masterDataSync.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/collectTools_lz/target/collecttool-1.0-SNAPSHOT.tar.gz  dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			ansible 10.45.150.87 -s -U root -m copy -a "src=$WORKSPACE/oceanmind-organization/organization.tar.gz dest=/home/rhino/oceanmind5_packages/OceanMind-Service/ owner=rhino group=rhino mode=0755"
+			fi
+			#备份及老化
+			ansible 10.45.150.87 -s -U rhino -m shell -a "cd /home/rhino/oceanmind5_packages/OceanMind-Service_bak/"
+			ansible 10.45.150.87 -s -U rhino -m shell -a "cd /home/rhino/oceanmind5_packages/OceanMind-Service_bak/;ls -rt|grep -v '[#][0-9]*[_]'|grep -v \\`ls -rt|tail -n 1\\`|xargs rm -rf;find ./ -mtime +20 -type d|xargs rm -rf"
+			ansible 10.45.150.87 -s -U rhino -m shell -a "cd /home/rhino/oceanmind5_packages/OceanMind-Service_bak/;cp -r ../OceanMind-Service/*  \\`ls -rt|tail -n 1\\`"
+			'''
+		    }
+		}
+	}
+  post {
+        failure {
+            emailext(
+                subject:"OceanMindV5(后台)打包失败: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                body:"""<p>FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>
+                <p>Log url: "<a href="${env.BUILD_URL}console">${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>"</p>""",
+                to:"dong.hong@sinovatio.com,zhou.chao1@sinovatio.com,liu.zhuang@sinovatio.com,da.qun@sinovatio.com,yu.yanchao@sinovatio.com,guo.yudong@sinovatio.com,liu.ran@sinovatio.com",
+                from:"devops@sinovatio.com"
+            )
+        }
+    }
+
+    }
